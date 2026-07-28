@@ -136,6 +136,9 @@ class StemMixerProcessor extends AudioWorkletProcessor {
         // plenty to trigger a refill without saturating the main thread.
         this._urgentInterval = Math.max(1, Math.round(0.01 * sampleRate));
         this._posAccum = 0;
+        // Whether the previous _maybePostPos saw an urgent (under-run) state, so
+        // the FIRST nudge on entry isn't swallowed by the rate-limit.
+        this._wasUrgent = false;
 
         this.port.onmessage = (e) => this._onMessage(e.data);
     }
@@ -341,12 +344,17 @@ class StemMixerProcessor extends AudioWorkletProcessor {
     }
 
     _maybePostPos(n, urgent) {
+        // Post IMMEDIATELY on the transition into an urgent (under-run) state so
+        // a short under-run isn't delayed ~10ms by the rate-limit; only the
+        // subsequent urgent posts are throttled.
+        const enteringUrgent = urgent && !this._wasUrgent;
+        this._wasUrgent = urgent;
         this._posAccum += n;
         // Urgent (under-run) posts use a shorter interval than steady-state, but
         // are STILL throttled — never post per-quantum (that floods main + makes
         // the under-run worse). See _urgentInterval note in the constructor.
         const threshold = urgent ? this._urgentInterval : this._posInterval;
-        if (this._posAccum >= threshold) {
+        if (enteringUrgent || this._posAccum >= threshold) {
             this._posAccum = 0;
             try {
                 // Floor the read frontier: under WSOLA `pos` is fractional, and the
