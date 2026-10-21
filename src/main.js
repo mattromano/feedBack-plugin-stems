@@ -3,7 +3,7 @@ import { clampVolume, coerceBool, hashString, isGuitarStemId } from './util.js';
 import { ensureCtx, ensureWorklet, updateLatencyOffset } from './audio-ctx.js';
 import { makeStemGainHandle } from './mix.js';
 import {
-    clearClaim, fadeGain, noteUserChange, persistableStems, recordClaimMute, restoreClaim,
+    fadeGain, noteUserChange, persistableStems, recordClaimMute, releaseClaim, restoreClaim,
 } from './claims.js';
 import { publishAudioGraph, retractAudioGraph } from './audio-graph-publish.js';
 import {
@@ -1405,14 +1405,21 @@ import {
         }
         const session = audioSessionApi();
         // Take the pre-claim states BEFORE telling core: restoreStems releases
-        // the capability claim, whose `claim:released` event clears this
-        // claim's snapshots synchronously (clearClaim below). Stems another
+        // the capability claim, whose `claim:released` event releases this
+        // claim's snapshots synchronously (the handler below). Stems another
         // claim still holds are left out (claims stack) and stay muted.
         const states = restoreClaim(claimSnapshots, claimId, () => {
             if (session && typeof session.restoreStems === 'function') {
                 session.restoreStems({ claimId, requester: cmdCtx.requester || 'stems.capability' });
             }
         });
+        const restoredIds = applyRestoredStates(states);
+        return { outcome: 'handled', payload: redactedSongRef({ claimId, restoredIds }) };
+    }
+
+    // Fade each stem back to its pre-claim state; returns the restored ids.
+    // Shared by capRestore and the `claim:released` handler.
+    function applyRestoredStates(states) {
         const restoredIds = [];
         for (const previous of states) {
             const stem = S.stemState.find(s => s.id === previous.id);
@@ -1421,7 +1428,7 @@ import {
                 restoredIds.push(stem.id);
             }
         }
-        return { outcome: 'handled', payload: redactedSongRef({ claimId, restoredIds }) };
+        return restoredIds;
     }
 
     function capSetVolume(cmdCtx = {}) {
@@ -1471,7 +1478,11 @@ import {
                     'unmute-guitar': capRestore,
                 },
                 eventHandlers: {
-                    'claim:released': (detail) => clearClaim(claimSnapshots, detail && detail.payload && detail.payload.claimId),
+                    // A released claim gives back its stems' pre-claim state:
+                    // core skips a restore as `overridden` after any player
+                    // toggle, or releases a gone requester's claim. A no-op
+                    // after capRestore, which already took the states.
+                    'claim:released': (detail) => applyRestoredStates(releaseClaim(claimSnapshots, detail && detail.payload && detail.payload.claimId)),
                 },
             },
             playback: {

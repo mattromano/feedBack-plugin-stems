@@ -76,11 +76,15 @@ test('fadeGain sets directly on a worklet gain handle that has no automation', (
 // snapshots. The fake session below does the same, so a restore that reads
 // the snapshots AFTER notifying core finds nothing to restore.
 
-function fakeCore(snapshots) {
-    // Stems' participant `claim:released` handler, as wired in main.js.
-    const onClaimReleased = (detail) => clearClaim(snapshots, detail && detail.payload && detail.payload.claimId);
+function fakeCore(snapshots, applied = []) {
+    // Stems' participant `claim:released` handler, as wired in main.js:
+    // releaseClaim, then apply what it returns (recorded in `applied`).
+    const onClaimReleased = (detail) => {
+        applied.push(...releaseClaim(snapshots, detail && detail.payload && detail.payload.claimId));
+    };
     return {
         restoreStems({ claimId }) { onClaimReleased({ payload: { claimId } }); },
+        release(claimId) { onClaimReleased({ payload: { claimId } }); },
     };
 }
 
@@ -123,6 +127,57 @@ test('clearClaim drops only that claim and ignores a missing id', () => {
     assert.equal(m.size, 2);
     clearClaim(m, 'a');
     assert.deepEqual(Array.from(m.values()).map(e => e.claimId), ['b']);
+});
+
+// ── A released claim gives back the player's state (final review C1) ──
+// Core skips a restore as `overridden` after any player stems toggle, then the
+// requester releases: `claim:released` must restore the snapshot.
+
+test('released without a restore: the stem gets its pre-claim state back', () => {
+    const m = new Map();
+    const drums = { id: 'drums', on: true, vol: 0.8 };
+    recordClaimMute(m, 'a', drums);
+    drums.on = false;
+    noteUserChange(m, 'guitar', { on: false });   // another stem: no effect
+    assert.deepEqual(releaseClaim(m, 'a'), [{ id: 'drums', on: true, vol: 0.8 }]);
+    assert.equal(m.size, 0);
+});
+
+test('released without a restore, stacked: releasing one of two keeps the stem muted', () => {
+    const m = new Map();
+    const drums = { id: 'drums', on: true, vol: 0.8 };
+    recordClaimMute(m, 'a', drums);
+    drums.on = false;
+    recordClaimMute(m, 'b', drums);
+    assert.deepEqual(releaseClaim(m, 'a'), []);
+    assert.deepEqual(releaseClaim(m, 'b'), [{ id: 'drums', on: true, vol: 0.8 }]);
+});
+
+test('through core: override on another stem, restore skipped, release restores the stem', () => {
+    const m = new Map();
+    const applied = [];
+    const core = fakeCore(m, applied);
+    const drums = { id: 'drums', on: true, vol: 0.8 };
+    recordClaimMute(m, 'bab', drums);
+    drums.on = false;
+    noteUserChange(m, 'guitar', { on: false });   // player toggles guitar
+    // Core answers the restore `overridden` and never calls stems; then release.
+    core.release('bab');
+    assert.deepEqual(applied, [{ id: 'drums', on: true, vol: 0.8 }]);
+    assert.equal(m.size, 0);
+});
+
+test('through core: a release after a successful restore is a no-op', () => {
+    const m = new Map();
+    const applied = [];
+    const core = fakeCore(m, applied);
+    recordClaimMute(m, 'a', { id: 'bass', on: true, vol: 0.7 });
+    // restoreStems fires claim:released inside restoreClaim: it finds nothing.
+    const states = restoreClaim(m, 'a', () => core.restoreStems({ claimId: 'a' }));
+    assert.deepEqual(states, [{ id: 'bass', on: true, vol: 0.7 }]);
+    assert.deepEqual(applied, []);
+    core.release('a');
+    assert.deepEqual(applied, []);
 });
 
 // ── An automation mute is never saved; player changes survive the restore ──
@@ -206,8 +261,11 @@ test('capRestore takes the pre-claim states before core can clear them', () => {
         'reading the snapshots with releaseClaim after notifying core is the bug (restoredIds: [])');
 });
 
-test('the claim:released handler clears through clearClaim', () => {
-    assert.match(MAIN, /'claim:released':\s*\(detail\)\s*=>\s*clearClaim\(claimSnapshots,/);
+test('a released claim restores its stems through the same helper as capRestore', () => {
+    assert.match(MAIN,
+        /'claim:released':\s*\(detail\)\s*=>\s*applyRestoredStates\(releaseClaim\(claimSnapshots,/);
+    assert.ok(fnBody(MAIN, 'function capRestore(').includes('applyRestoredStates('),
+        'capRestore must apply its states through applyRestoredStates');
 });
 
 test('every saveMuted call saves persistableStems', () => {
