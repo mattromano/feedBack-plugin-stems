@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
     CLAIM_FADE_TC_S, recordClaimMute, releaseClaim, restoreClaim, clearClaim, fadeGain,
+    persistableStems, noteUserChange,
 } from '../src/claims.js';
 
 test('one claim: mute then restore gives the user\'s state back', () => {
@@ -124,6 +125,58 @@ test('clearClaim drops only that claim and ignores a missing id', () => {
     assert.deepEqual(Array.from(m.values()).map(e => e.claimId), ['b']);
 });
 
+// ── An automation mute is never saved; player changes survive the restore ──
+
+test('a claimed stem is saved with the player\'s own state', () => {
+    const m = new Map();
+    const drums = { id: 'drums', on: true, vol: 0.8 };
+    const guitar = { id: 'guitar', on: false, vol: 1 };
+    recordClaimMute(m, 'a', drums);
+    drums.on = false;
+    assert.deepEqual(persistableStems([drums, guitar], m),
+        [{ id: 'drums', on: true }, { id: 'guitar', on: false }]);
+});
+
+test('stacked claims save the same pre-claim state', () => {
+    const m = new Map();
+    const drums = { id: 'drums', on: true, vol: 0.8 };
+    recordClaimMute(m, 'a', drums);
+    drums.on = false;
+    recordClaimMute(m, 'b', drums);
+    assert.deepEqual(persistableStems([drums], m), [{ id: 'drums', on: true }]);
+    releaseClaim(m, 'a');
+    assert.deepEqual(persistableStems([drums], m), [{ id: 'drums', on: true }]);
+});
+
+test('a player change during a claim is what the last restore gives back', () => {
+    const m = new Map();
+    const drums = { id: 'drums', on: true, vol: 0.8 };
+    recordClaimMute(m, 'a', drums);
+    recordClaimMute(m, 'b', drums);
+    noteUserChange(m, 'drums', { vol: 0.5 });
+    assert.deepEqual(releaseClaim(m, 'a'), []);
+    assert.deepEqual(releaseClaim(m, 'b'), [{ id: 'drums', on: true, vol: 0.5 }]);
+
+    const m2 = new Map();
+    recordClaimMute(m2, 'a', drums);
+    recordClaimMute(m2, 'b', drums);
+    noteUserChange(m2, 'drums', { on: false });
+    assert.deepEqual(releaseClaim(m2, 'a'), []);
+    assert.deepEqual(releaseClaim(m2, 'b'), [{ id: 'drums', on: false, vol: 0.8 }]);
+});
+
+test('noteUserChange ignores unclaimed stems and junk', () => {
+    const m = new Map();
+    recordClaimMute(m, 'a', { id: 'drums', on: true, vol: 0.8 });
+    const before = structuredClone(m);
+    noteUserChange(m, 'bass', { on: false });
+    assert.deepEqual(m, before);
+    noteUserChange(m, 'drums', { on: 'x', vol: NaN });
+    assert.deepEqual(m, before);
+    noteUserChange(m, 'drums');
+    assert.deepEqual(m, before);
+});
+
 // main.js is the entry module (importing it runs the plugin), so its wiring is
 // pinned by source shape, in the style of tests/preload.test.mjs.
 const MAIN = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'main.js'), 'utf8');
@@ -155,4 +208,24 @@ test('capRestore takes the pre-claim states before core can clear them', () => {
 
 test('the claim:released handler clears through clearClaim', () => {
     assert.match(MAIN, /'claim:released':\s*\(detail\)\s*=>\s*clearClaim\(claimSnapshots,/);
+});
+
+test('every saveMuted call saves persistableStems', () => {
+    const calls = [...MAIN.matchAll(/saveMuted\(/g)];
+    assert.equal(calls.length, 2);
+    for (const c of calls) {
+        assert.ok(MAIN.startsWith('storageSongKey(), persistableStems(S.stemState, claimSnapshots)', c.index + c[0].length),
+            `saveMuted at ${c.index} must save persistableStems(S.stemState, claimSnapshots)`);
+    }
+});
+
+test('player changes reach the claim snapshots', () => {
+    assert.ok(fnBody(MAIN, 'function setStemVolume(').includes('noteUserChange(claimSnapshots, stem.id'));
+    assert.ok(fnBody(MAIN, 'setMuted(id, muted) {').includes('noteUserChange(claimSnapshots, s.id'));
+    const start = MAIN.indexOf('btn.onclick = (event) =>');
+    assert.ok(start !== -1);
+    const window600 = MAIN.slice(start, start + 600);
+    const note = window600.indexOf('noteUserChange(claimSnapshots, s.id');
+    const save = window600.indexOf('saveMuted(');
+    assert.ok(note !== -1 && save !== -1 && note < save, 'onclick must note the change before saving');
 });

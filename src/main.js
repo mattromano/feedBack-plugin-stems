@@ -2,7 +2,9 @@ import { computeMixGains } from './mix-gains.js';
 import { clampVolume, coerceBool, hashString, isGuitarStemId } from './util.js';
 import { ensureCtx, ensureWorklet, updateLatencyOffset } from './audio-ctx.js';
 import { makeStemGainHandle } from './mix.js';
-import { clearClaim, fadeGain, recordClaimMute, restoreClaim } from './claims.js';
+import {
+    clearClaim, fadeGain, noteUserChange, persistableStems, recordClaimMute, restoreClaim,
+} from './claims.js';
 import { publishAudioGraph, retractAudioGraph } from './audio-graph-publish.js';
 import {
     setupStreaming, resetStreamState, streamingSupported, isWavResponse, configureStreaming,
@@ -164,7 +166,10 @@ import {
         stem.vol = clamped;
         if (stem.on && stem.gain) stem.gain.gain.value = clamped;
         updateStemButton(stem, options);
-        if (options.persist !== false && changed) saveVolume(storageSongKey(), stem.id, clamped);
+        if (options.persist !== false) {
+            noteUserChange(claimSnapshots, stem.id, { vol: clamped });
+            if (changed) saveVolume(storageSongKey(), stem.id, clamped);
+        }
         return true;
     }
 
@@ -452,7 +457,8 @@ import {
                 s.on = !s.on;
                 if (s.gain) s.gain.gain.value = s.on ? s.vol : 0;
                 updateStemButton(s);
-                saveMuted(storageSongKey(), S.stemState);
+                noteUserChange(claimSnapshots, s.id, { on: s.on });
+                saveMuted(storageSongKey(), persistableStems(S.stemState, claimSnapshots));
                 registerStemOwnerStatus('available');
                 recordStemUserOverride(s, 'User toggled Stems mute');
             };
@@ -1547,7 +1553,8 @@ import {
                 s.on = !m;
                 if (s.gain) s.gain.gain.value = s.on ? s.vol : 0;
                 updateStemButton(s);
-                saveMuted(storageSongKey(), S.stemState);
+                noteUserChange(claimSnapshots, s.id, { on: s.on });
+                saveMuted(storageSongKey(), persistableStems(S.stemState, claimSnapshots));
                 applied = true;
             }
             if (applied) registerStemOwnerStatus('available');

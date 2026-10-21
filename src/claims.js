@@ -67,6 +67,29 @@ export function clearClaim(snapshots, claimId) {
     }
 }
 
+// What the song's saved mutes should record: a stem held by any claim reports
+// that claim's pre-claim `prevOn` (stacked claims carry the same value), so an
+// automation mute is never persisted; any other stem reports its own `on`.
+export function persistableStems(stems, snapshots) {
+    return stems.map((stem) => {
+        for (const entry of snapshots.values()) {
+            if (entry.id === stem.id) return { id: stem.id, on: entry.prevOn };
+        }
+        return { id: stem.id, on: stem.on };
+    });
+}
+
+// A player change to a stem while claims hold it: update every claim's
+// pre-claim state, so the last restore gives back the player's choice.
+// Only a boolean `on` and a finite `vol` are taken; an unclaimed id is a no-op.
+export function noteUserChange(snapshots, id, { on, vol } = {}) {
+    for (const entry of snapshots.values()) {
+        if (entry.id !== id) continue;
+        if (typeof on === 'boolean') entry.prevOn = on;
+        if (Number.isFinite(vol)) entry.prevVol = vol;
+    }
+}
+
 // Move a GainNode to `target`: a short exponential approach when an
 // AudioContext is available, an immediate set otherwise. The worklet-mode
 // stand-in (makeStemGainHandle, src/mix.js) has no AudioParam automation,
