@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
     CLAIM_FADE_TC_S, recordClaimMute, releaseClaim, restoreClaim, clearClaim, fadeGain,
-    persistableStems, noteUserChange, stemsNeedingReassert, coalesce,
+    persistableStems, noteUserChange, stemsNeedingReassert, coalesce, markPlayerOverride,
 } from '../src/claims.js';
 
 test('one claim: mute then restore gives the user\'s state back', () => {
@@ -312,7 +312,7 @@ function fakeStem(id, on, vol) {
     return { id, on, vol, gain: { gain: { value: on ? vol : 0 } } };
 }
 
-function harness(stems) {
+function harness(stems, { realMicrotasks = false } = {}) {
     const snapshots = new Map();
     const timers = [];
     const applied = [];
@@ -325,7 +325,8 @@ function harness(stems) {
             s.gain.gain.value = 0;
         }
     };
-    const scheduleReassert = coalesce((fn) => timers.push(fn), reassertClaims);
+    const scheduleReassert = coalesce(
+        realMicrotasks ? (fn) => queueMicrotask(fn) : (fn) => timers.push(fn), reassertClaims);
     const api = {
         setVolume(id, v) {
             for (const s of stems) {
@@ -351,6 +352,7 @@ function harness(stems) {
         s.on = !s.on;
         s.gain.gain.value = s.on ? s.vol : 0;
         noteUserChange(snapshots, s.id, { on: s.on });
+        markPlayerOverride(snapshots, s.id, s.on);
         saves.push(persistableStems(stems, snapshots));
     };
     const mute = (claimId, s) => {    // capMute
@@ -440,9 +442,81 @@ test('main.js: stemsApi schedules the reassert; the stem button does not', () =>
     }
     const start = MAIN.indexOf('btn.onclick = (event) =>');
     assert.doesNotMatch(fnBody(MAIN.slice(start), 'btn.onclick = (event) =>'), /scheduleClaimReassert/);
-    assert.match(MAIN, /const scheduleClaimReassert = coalesce\(\s*\(fn\) => setTimeout\(fn, 0\),\s*reassertClaims\s*\)/);
+    assert.match(MAIN, /const scheduleClaimReassert = coalesce\(\s*\(fn\) => queueMicrotask\(fn\),\s*reassertClaims\s*\)/);
+    assert.doesNotMatch(MAIN, /scheduleClaimReassert = coalesce\([^;]*setTimeout/);
     const body = fnBody(MAIN, 'function reassertClaims(');
     assert.match(body, /stemsNeedingReassert\(S\.stemState, claimSnapshots\)/);
     assert.match(body, /applyStemState\(s, false, s\.vol, \{ fade: true \}\)/);
     assert.doesNotMatch(body, /save|noteUserChange|recordClaimMute|releaseClaim|clearClaim/);
+});
+
+// ── Follow-up: microtask reassert; the player's button override sticks ─────
+
+test('the reassert runs in a microtask, after the caller\'s synchronous writes', async () => {
+    const drums = fakeStem('drums', true, 0.8);
+    const h = harness([drums], { realMicrotasks: true });
+    h.mute('a', drums);
+    stemMixerPush(h.api, [drums], 'drums', 0.6);
+    assert.equal(drums.on, true, 'not before the caller\'s writes finish');
+    await Promise.resolve();
+    assert.equal(drums.on, false);
+    assert.equal(drums.gain.gain.value, 0);
+    assert.deepEqual(h.applied, ['drums'], 'coalesced into one pass');
+});
+
+test('the player clicks a claimed stem on: a stem_mixer push does not re-mute it', () => {
+    const drums = fakeStem('drums', true, 0.8);
+    const h = harness([drums]);
+    h.mute('a', drums);
+    h.mute('b', drums);
+    h.click(drums);
+    assert.ok(Array.from(h.snapshots.values()).every(e => e.playerOverride === true),
+        'every claim holding the stem is marked');
+    h.api.setVolume('drums', 0.6);
+    h.api.setMuted('drums', false);
+    h.flush();
+    assert.deepEqual(h.applied, []);
+    assert.equal(drums.on, true);
+    assert.equal(drums.gain.gain.value, 0.6);
+});
+
+test('muting again with the button clears the override; release drops it', () => {
+    const drums = fakeStem('drums', true, 0.8);
+    const h = harness([drums]);
+    h.mute('a', drums);
+    h.click(drums);                    // on: overridden
+    h.click(drums);                    // off again: override cleared
+    assert.ok(Array.from(h.snapshots.values()).every(e => !e.playerOverride));
+    stemMixerPush(h.api, [drums], 'drums', 0.6);
+    h.flush();
+    assert.deepEqual(h.applied, ['drums']);
+    h.click(drums);
+    releaseClaim(h.snapshots, 'a');
+    assert.equal(h.snapshots.size, 0);
+    h.mute('c', drums);                // a fresh claim starts unflagged
+    assert.equal(h.snapshots.get('c:drums').playerOverride, undefined);
+});
+
+test('a claim made after the override still reasserts; markPlayerOverride ignores unclaimed ids', () => {
+    const m = new Map();
+    const drums = fakeStem('drums', false, 0.8);
+    recordClaimMute(m, 'a', drums);
+    markPlayerOverride(m, 'drums', true);
+    drums.on = true;
+    assert.deepEqual(stemsNeedingReassert([drums], m), []);
+    recordClaimMute(m, 'b', drums);    // newer claim: not overridden
+    assert.deepEqual(stemsNeedingReassert([drums], m).map(s => s.id), ['drums']);
+    const before = structuredClone(m);
+    markPlayerOverride(m, 'bass', true);
+    assert.deepEqual(m, before);
+});
+
+test('main.js: the stem button marks the override after noting the change', () => {
+    const start = MAIN.indexOf('btn.onclick = (event) =>');
+    const body = fnBody(MAIN.slice(start), 'btn.onclick = (event) =>');
+    const note = body.indexOf('noteUserChange(claimSnapshots, s.id, { on: s.on })');
+    const mark = body.indexOf('markPlayerOverride(claimSnapshots, s.id, s.on)');
+    assert.ok(note !== -1 && mark > note, 'onclick must mark the player override after noteUserChange');
+    assert.doesNotMatch(fnBody(MAIN, 'setMuted(id, muted) {'), /markPlayerOverride/);
+    assert.doesNotMatch(fnBody(MAIN, 'setVolume(id, vol) {'), /markPlayerOverride/);
 });

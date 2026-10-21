@@ -91,12 +91,26 @@ export function noteUserChange(snapshots, id, { on, vol } = {}) {
     }
 }
 
+// The player's own stem button un-muted (`overridden` true) or re-muted
+// (false) a claim-held stem: flag every claim entry holding it. A flagged
+// claim is not reasserted; releasing the claim drops the entry and its flag.
+// An id no claim holds is a no-op.
+export function markPlayerOverride(snapshots, id, overridden) {
+    for (const entry of snapshots.values()) {
+        if (entry.id === id) entry.playerOverride = !!overridden;
+    }
+}
+
 // Claim-held stems that are live again (on, or with gain above 0): another
 // plugin un-muted them under a claim (e.g. stem_mixer writes `on`/`gain`
-// straight onto window.stems.stemState). Unclaimed stems are never returned.
+// straight onto window.stems.stemState). Unclaimed stems are never returned,
+// nor stems whose every claim the player overrode with the stem button (a
+// claim made after the override still counts).
 export function stemsNeedingReassert(stems, snapshots) {
     const held = new Set();
-    for (const entry of snapshots.values()) held.add(entry.id);
+    for (const entry of snapshots.values()) {
+        if (!entry.playerOverride) held.add(entry.id);
+    }
     return stems.filter(s => held.has(s.id)
         && (s.on || !!(s.gain && s.gain.gain && s.gain.gain.value > 0)));
 }

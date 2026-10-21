@@ -3,8 +3,8 @@ import { clampVolume, coerceBool, hashString, isGuitarStemId } from './util.js';
 import { ensureCtx, ensureWorklet, updateLatencyOffset } from './audio-ctx.js';
 import { makeStemGainHandle } from './mix.js';
 import {
-    coalesce, fadeGain, noteUserChange, persistableStems, recordClaimMute, releaseClaim, restoreClaim,
-    stemsNeedingReassert,
+    coalesce, fadeGain, markPlayerOverride, noteUserChange, persistableStems, recordClaimMute,
+    releaseClaim, restoreClaim, stemsNeedingReassert,
 } from './claims.js';
 import { publishAudioGraph, retractAudioGraph } from './audio-graph-publish.js';
 import {
@@ -462,6 +462,7 @@ import {
                 if (s.gain) s.gain.gain.value = s.on ? s.vol : 0;
                 updateStemButton(s);
                 noteUserChange(claimSnapshots, s.id, { on: s.on });
+                markPlayerOverride(claimSnapshots, s.id, s.on);
                 saveMuted(storageSongKey(), persistableStems(S.stemState, claimSnapshots));
                 registerStemOwnerStatus('available');
                 recordStemUserOverride(s, 'User toggled Stems mute');
@@ -1306,15 +1307,18 @@ import {
     // Claims are sticky against other plugins. stem_mixer calls setVolume /
     // setMuted(false) and then writes `on`/`gain` straight onto stemState, so
     // after any window.stems change, re-mute every claim-held stem that is live
-    // again. No snapshots, no saves, no unclaimed stems. setTimeout(0) runs
-    // after the caller's remaining synchronous writes; repeats coalesce.
+    // again. No snapshots, no saves, no unclaimed stems, and not a stem the
+    // player un-muted with its own button (markPlayerOverride). A microtask
+    // runs after the caller's remaining synchronous writes but before the
+    // event loop turns, so the worklet gets the `v` and `0` gain posts back to
+    // back; repeats coalesce.
     function reassertClaims() {
         for (const s of stemsNeedingReassert(S.stemState, claimSnapshots)) {
             if (!s.gain) { s.on = false; updateStemButton(s); continue; }
             applyStemState(s, false, s.vol, { fade: true });
         }
     }
-    const scheduleClaimReassert = coalesce((fn) => setTimeout(fn, 0), reassertClaims);
+    const scheduleClaimReassert = coalesce((fn) => queueMicrotask(fn), reassertClaims);
 
     // Per-stem display metadata for provider-ready listeners (e.g. stem_mixer):
     // id always, plus the manifest's optional `name`/`description` (feedpak
