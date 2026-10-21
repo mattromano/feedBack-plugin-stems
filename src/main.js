@@ -3,7 +3,8 @@ import { clampVolume, coerceBool, hashString, isGuitarStemId } from './util.js';
 import { ensureCtx, ensureWorklet, updateLatencyOffset } from './audio-ctx.js';
 import { makeStemGainHandle } from './mix.js';
 import {
-    fadeGain, noteUserChange, persistableStems, recordClaimMute, releaseClaim, restoreClaim,
+    coalesce, fadeGain, noteUserChange, persistableStems, recordClaimMute, releaseClaim, restoreClaim,
+    stemsNeedingReassert,
 } from './claims.js';
 import { publishAudioGraph, retractAudioGraph } from './audio-graph-publish.js';
 import {
@@ -1302,6 +1303,19 @@ import {
         registerStemOwnerStatus('available');
     }
 
+    // Claims are sticky against other plugins. stem_mixer calls setVolume /
+    // setMuted(false) and then writes `on`/`gain` straight onto stemState, so
+    // after any window.stems change, re-mute every claim-held stem that is live
+    // again. No snapshots, no saves, no unclaimed stems. setTimeout(0) runs
+    // after the caller's remaining synchronous writes; repeats coalesce.
+    function reassertClaims() {
+        for (const s of stemsNeedingReassert(S.stemState, claimSnapshots)) {
+            if (!s.gain) { s.on = false; updateStemButton(s); continue; }
+            applyStemState(s, false, s.vol, { fade: true });
+        }
+    }
+    const scheduleClaimReassert = coalesce((fn) => setTimeout(fn, 0), reassertClaims);
+
     // Per-stem display metadata for provider-ready listeners (e.g. stem_mixer):
     // id always, plus the manifest's optional `name`/`description` (feedpak
     // §5.3) when present — already normalized to `string | undefined` at load
@@ -1555,7 +1569,10 @@ import {
                 setStemVolume(s, clamped);
                 applied = true;
             }
-            if (applied) registerStemOwnerStatus('available');
+            if (applied) {
+                registerStemOwnerStatus('available');
+                scheduleClaimReassert();
+            }
             return applied ? clamped : undefined;
         },
         setMuted(id, muted) {
@@ -1571,7 +1588,10 @@ import {
                 saveMuted(storageSongKey(), persistableStems(S.stemState, claimSnapshots));
                 applied = true;
             }
-            if (applied) registerStemOwnerStatus('available');
+            if (applied) {
+                registerStemOwnerStatus('available');
+                scheduleClaimReassert();
+            }
         },
     };
     Object.defineProperty(stemsApi, 'stemState', {

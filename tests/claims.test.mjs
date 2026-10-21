@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
     CLAIM_FADE_TC_S, recordClaimMute, releaseClaim, restoreClaim, clearClaim, fadeGain,
-    persistableStems, noteUserChange,
+    persistableStems, noteUserChange, stemsNeedingReassert, coalesce,
 } from '../src/claims.js';
 
 test('one claim: mute then restore gives the user\'s state back', () => {
@@ -297,4 +297,152 @@ test('player changes reach the claim snapshots', () => {
     const note = window600.indexOf('noteUserChange(claimSnapshots, s.id');
     const save = window600.indexOf('saveMuted(');
     assert.ok(note !== -1 && save !== -1 && note < save, 'onclick must note the change before saving');
+});
+
+// ── Real-app bug 2: another plugin un-mutes a claimed stem ─────────────────
+// stem_mixer (third-party) pushes saved levels on provider-ready / song:ready
+// and a 120-1800 ms bootstrap ladder: window.stems.setVolume, setMuted(false),
+// then writes `on`/`gain.gain.value` straight onto stemState's live objects.
+// Claims are sticky against other plugins: the stemsApi path records the
+// change into the snapshots and schedules one reassert that re-mutes every
+// claim-held stem that is live again. The harness mirrors main.js's wiring
+// with fakes (no AudioContext, nothing audible).
+
+function fakeStem(id, on, vol) {
+    return { id, on, vol, gain: { gain: { value: on ? vol : 0 } } };
+}
+
+function harness(stems) {
+    const snapshots = new Map();
+    const timers = [];
+    const applied = [];
+    const saves = [];
+    // applyStemState(s, false, s.vol, { fade: true }) with no AudioContext.
+    const reassertClaims = () => {
+        for (const s of stemsNeedingReassert(stems, snapshots)) {
+            applied.push(s.id);
+            s.on = false;
+            s.gain.gain.value = 0;
+        }
+    };
+    const scheduleReassert = coalesce((fn) => timers.push(fn), reassertClaims);
+    const api = {
+        setVolume(id, v) {
+            for (const s of stems) {
+                if (s.id !== id) continue;
+                s.vol = v;
+                if (s.on) s.gain.gain.value = v;
+                noteUserChange(snapshots, s.id, { vol: v });
+            }
+            scheduleReassert();
+        },
+        setMuted(id, muted) {
+            for (const s of stems) {
+                if (s.id !== id) continue;
+                s.on = !muted;
+                s.gain.gain.value = s.on ? s.vol : 0;
+                noteUserChange(snapshots, s.id, { on: s.on });
+                saves.push(persistableStems(stems, snapshots));
+            }
+            scheduleReassert();
+        },
+    };
+    const click = (s) => {            // the player's own stem button
+        s.on = !s.on;
+        s.gain.gain.value = s.on ? s.vol : 0;
+        noteUserChange(snapshots, s.id, { on: s.on });
+        saves.push(persistableStems(stems, snapshots));
+    };
+    const mute = (claimId, s) => {    // capMute
+        recordClaimMute(snapshots, claimId, s);
+        s.on = false;
+        s.gain.gain.value = 0;
+    };
+    const flush = () => { while (timers.length) timers.shift()(); };
+    return { snapshots, timers, applied, saves, api, click, mute, flush };
+}
+
+function stemMixerPush(api, stems, id, v) {
+    api.setVolume(id, v);
+    api.setMuted(id, false);
+    const item = stems.find(s => s.id === id);
+    item.on = true;
+    item.gain.gain.value = v;
+}
+
+test('a claimed stem stays muted through a stem_mixer push and restores at its volume', () => {
+    const drums = fakeStem('drums', true, 0.8);
+    const h = harness([drums]);
+    h.mute('build_a_band:sound:drums', drums);
+    stemMixerPush(h.api, [drums], 'drums', 0.6);
+    assert.equal(drums.on, true, 'the mixer wrote it on synchronously');
+    h.flush();
+    assert.equal(drums.on, false);
+    assert.equal(drums.gain.gain.value, 0);
+    assert.deepEqual(h.saves.at(-1), [{ id: 'drums', on: true }], 'never saved as muted');
+    assert.deepEqual(releaseClaim(h.snapshots, 'build_a_band:sound:drums'),
+        [{ id: 'drums', on: true, vol: 0.6 }]);
+});
+
+test('repeated schedules coalesce into one reassert pass', () => {
+    const drums = fakeStem('drums', true, 0.8);
+    const h = harness([drums]);
+    h.mute('a', drums);
+    stemMixerPush(h.api, [drums], 'drums', 0.6);
+    stemMixerPush(h.api, [drums], 'drums', 0.5);
+    assert.equal(h.timers.length, 1);
+    h.flush();
+    assert.deepEqual(h.applied, ['drums']);
+    stemMixerPush(h.api, [drums], 'drums', 0.4);
+    assert.equal(h.timers.length, 1, 'a new schedule after the pass ran');
+});
+
+test('an unclaimed stem is unaffected by the reassert', () => {
+    const drums = fakeStem('drums', true, 0.8);
+    const bass = fakeStem('bass', false, 0.7);
+    const h = harness([drums, bass]);
+    h.mute('a', drums);
+    stemMixerPush(h.api, [drums, bass], 'bass', 0.9);
+    stemMixerPush(h.api, [drums, bass], 'drums', 0.6);
+    h.flush();
+    assert.deepEqual(h.applied, ['drums']);
+    assert.equal(bass.on, true);
+    assert.equal(bass.gain.gain.value, 0.9);
+    assert.equal(h.snapshots.size, 1, 'the reassert never touches the snapshots');
+});
+
+test('the player\'s button click on a claimed stem unmutes it with no reassert', () => {
+    const drums = fakeStem('drums', true, 0.8);
+    const h = harness([drums]);
+    h.mute('a', drums);
+    h.click(drums);
+    assert.equal(h.timers.length, 0);
+    h.flush();
+    assert.equal(drums.on, true);
+    assert.equal(drums.gain.gain.value, 0.8);
+});
+
+test('stemsNeedingReassert picks claim-held stems that are on or have gain', () => {
+    const m = new Map();
+    const a = fakeStem('a', false, 0.8);
+    const b = fakeStem('b', false, 0.8);
+    const c = fakeStem('c', true, 0.8);
+    const d = fakeStem('d', false, 0.8);
+    for (const s of [a, b, d]) recordClaimMute(m, 'x', s);
+    b.gain.gain.value = 0.3;            // muted flag but live gain
+    d.on = true; d.gain = null;          // no graph yet: on alone counts
+    assert.deepEqual(stemsNeedingReassert([a, b, c, d], m).map(s => s.id), ['b', 'd']);
+});
+
+test('main.js: stemsApi schedules the reassert; the stem button does not', () => {
+    for (const sig of ['setVolume(id, vol) {', 'setMuted(id, muted) {']) {
+        assert.ok(fnBody(MAIN, sig).includes('scheduleClaimReassert()'), `${sig} must schedule a reassert`);
+    }
+    const start = MAIN.indexOf('btn.onclick = (event) =>');
+    assert.doesNotMatch(fnBody(MAIN.slice(start), 'btn.onclick = (event) =>'), /scheduleClaimReassert/);
+    assert.match(MAIN, /const scheduleClaimReassert = coalesce\(\s*\(fn\) => setTimeout\(fn, 0\),\s*reassertClaims\s*\)/);
+    const body = fnBody(MAIN, 'function reassertClaims(');
+    assert.match(body, /stemsNeedingReassert\(S\.stemState, claimSnapshots\)/);
+    assert.match(body, /applyStemState\(s, false, s\.vol, \{ fade: true \}\)/);
+    assert.doesNotMatch(body, /save|noteUserChange|recordClaimMute|releaseClaim|clearClaim/);
 });

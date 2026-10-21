@@ -91,6 +91,29 @@ export function noteUserChange(snapshots, id, { on, vol } = {}) {
     }
 }
 
+// Claim-held stems that are live again (on, or with gain above 0): another
+// plugin un-muted them under a claim (e.g. stem_mixer writes `on`/`gain`
+// straight onto window.stems.stemState). Unclaimed stems are never returned.
+export function stemsNeedingReassert(stems, snapshots) {
+    const held = new Set();
+    for (const entry of snapshots.values()) held.add(entry.id);
+    return stems.filter(s => held.has(s.id)
+        && (s.on || !!(s.gain && s.gain.gain && s.gain.gain.value > 0)));
+}
+
+// Coalesce repeated requests into one `run` per `schedule` turn.
+export function coalesce(schedule, run) {
+    let pending = false;
+    return () => {
+        if (pending) return;
+        pending = true;
+        schedule(() => {
+            pending = false;
+            run();
+        });
+    };
+}
+
 // Move a GainNode to `target`: a short exponential approach when an
 // AudioContext is available, an immediate set otherwise. The worklet-mode
 // stand-in (makeStemGainHandle, src/mix.js) has no AudioParam automation,
