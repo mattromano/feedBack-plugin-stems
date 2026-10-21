@@ -2,7 +2,7 @@ import { computeMixGains } from './mix-gains.js';
 import { clampVolume, coerceBool, hashString, isGuitarStemId } from './util.js';
 import { ensureCtx, ensureWorklet, updateLatencyOffset } from './audio-ctx.js';
 import { makeStemGainHandle } from './mix.js';
-import { fadeGain, recordClaimMute, releaseClaim } from './claims.js';
+import { clearClaim, fadeGain, recordClaimMute, restoreClaim } from './claims.js';
 import { publishAudioGraph, retractAudioGraph } from './audio-graph-publish.js';
 import {
     setupStreaming, resetStreamState, streamingSupported, isWavResponse, configureStreaming,
@@ -1395,13 +1395,17 @@ import {
             return { outcome: 'no-target', reason: 'Restore requires a claimId', payload: redactedSongRef({ restoredIds: [] }) };
         }
         const session = audioSessionApi();
-        if (session && typeof session.restoreStems === 'function' && claimId) {
-            try { session.restoreStems({ claimId, requester: cmdCtx.requester || 'stems.capability' }); }
-            catch (_) {}
-        }
+        // Take the pre-claim states BEFORE telling core: restoreStems releases
+        // the capability claim, whose `claim:released` event clears this
+        // claim's snapshots synchronously (clearClaim below). Stems another
+        // claim still holds are left out (claims stack) and stay muted.
+        const states = restoreClaim(claimSnapshots, claimId, () => {
+            if (session && typeof session.restoreStems === 'function') {
+                session.restoreStems({ claimId, requester: cmdCtx.requester || 'stems.capability' });
+            }
+        });
         const restoredIds = [];
-        // Stems another claim still holds stay muted (claims stack).
-        for (const previous of releaseClaim(claimSnapshots, claimId)) {
+        for (const previous of states) {
             const stem = S.stemState.find(s => s.id === previous.id);
             if (stem) {
                 applyStemState(stem, previous.on, previous.vol, { fade: true });
@@ -1409,13 +1413,6 @@ import {
             }
         }
         return { outcome: 'handled', payload: redactedSongRef({ claimId, restoredIds }) };
-    }
-
-    function clearClaimSnapshots(claimId) {
-        if (!claimId) return;
-        for (const [key, previous] of Array.from(claimSnapshots.entries())) {
-            if (previous.claimId === claimId) claimSnapshots.delete(key);
-        }
     }
 
     function capSetVolume(cmdCtx = {}) {
@@ -1465,7 +1462,7 @@ import {
                     'unmute-guitar': capRestore,
                 },
                 eventHandlers: {
-                    'claim:released': (detail) => clearClaimSnapshots(detail && detail.payload && detail.payload.claimId),
+                    'claim:released': (detail) => clearClaim(claimSnapshots, detail && detail.payload && detail.payload.claimId),
                 },
             },
             playback: {

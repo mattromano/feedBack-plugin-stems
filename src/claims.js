@@ -45,6 +45,28 @@ export function releaseClaim(snapshots, claimId) {
         .map(entry => ({ id: entry.id, on: entry.prevOn, vol: entry.prevVol }));
 }
 
+// Release `claimId` and tell core, in that order. Core's
+// audioSession.restoreStems() calls capabilities.release(), which emits
+// `claim:released` synchronously, and Stems' handler for it (clearClaim)
+// deletes this claim's snapshots — so the pre-claim states must be taken
+// before `notifyCore` runs. A throwing `notifyCore` doesn't lose them.
+export function restoreClaim(snapshots, claimId, notifyCore) {
+    const states = releaseClaim(snapshots, claimId);
+    if (typeof notifyCore === 'function') {
+        try { notifyCore(); } catch (_) {}
+    }
+    return states;
+}
+
+// Drop every snapshot of `claimId` without restoring (the `claim:released`
+// handler). A no-op when the id is missing.
+export function clearClaim(snapshots, claimId) {
+    if (!claimId) return;
+    for (const [key, entry] of Array.from(snapshots.entries())) {
+        if (entry.claimId === claimId) snapshots.delete(key);
+    }
+}
+
 // Move a GainNode to `target`: a short exponential approach when an
 // AudioContext is available, an immediate set otherwise. The worklet-mode
 // stand-in (makeStemGainHandle, src/mix.js) has no AudioParam automation,
