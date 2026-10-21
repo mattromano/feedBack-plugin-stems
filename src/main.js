@@ -167,6 +167,8 @@ import {
         if (stem.on && stem.gain) stem.gain.gain.value = clamped;
         updateStemButton(stem, options);
         if (options.persist !== false) {
+            // Also reached by another plugin's setVolume (capSetVolume): on a
+            // claimed stem that counts as a player change, as it is persisted.
             noteUserChange(claimSnapshots, stem.id, { vol: clamped });
             if (changed) saveVolume(storageSongKey(), stem.id, clamped);
         }
@@ -425,6 +427,7 @@ import {
                     if (event.type === 'pointerup') {
                         event.preventDefault();
                         setStemVolumeFromPointer(s, btn, event, { persist: false }, pointerBounds);
+                        noteUserChange(claimSnapshots, s.id, { vol: s.vol });
                         saveVolume(pointerFilename, s.id, s.vol);
                         setTimeout(() => { suppressNextClick = false; }, 0);
                     } else {

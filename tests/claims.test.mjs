@@ -220,7 +220,18 @@ test('every saveMuted call saves persistableStems', () => {
 });
 
 test('player changes reach the claim snapshots', () => {
-    assert.ok(fnBody(MAIN, 'function setStemVolume(').includes('noteUserChange(claimSnapshots, stem.id'));
+    const setVol = fnBody(MAIN, 'function setStemVolume(');
+    assert.ok(setVol.includes('noteUserChange(claimSnapshots, stem.id'));
+    // Inside the persist guard: drag previews and the initial render
+    // (persist: false) are not player changes.
+    const guard = fnBody(setVol, 'if (options.persist !== false)');
+    assert.ok(guard.includes('noteUserChange(claimSnapshots, stem.id'),
+        'noteUserChange must sit inside the options.persist !== false guard');
+    // The drag commit saves the volume directly; it must reach the snapshots too.
+    const drag = fnBody(MAIN, "if (event.type === 'pointerup') {");
+    const dragNote = drag.indexOf('noteUserChange(claimSnapshots, s.id, { vol: s.vol })');
+    assert.ok(dragNote !== -1, 'finishVolumeGesture must note the dragged volume');
+    assert.ok(drag.includes('saveVolume(pointerFilename, s.id, s.vol)'));
     assert.ok(fnBody(MAIN, 'setMuted(id, muted) {').includes('noteUserChange(claimSnapshots, s.id'));
     const start = MAIN.indexOf('btn.onclick = (event) =>');
     assert.ok(start !== -1);
