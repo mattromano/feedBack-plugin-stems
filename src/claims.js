@@ -48,7 +48,8 @@ export function releaseClaim(snapshots, claimId) {
 // Move a GainNode to `target`: a short exponential approach when an
 // AudioContext is available, an immediate set otherwise. The worklet-mode
 // stand-in (makeStemGainHandle, src/mix.js) has no AudioParam automation,
-// so it is also set directly.
+// so it is also set directly; the worklet ramps every gain change itself
+// over ~12 ms (assets/stretch-worklet.js `_rampGains`), so it still fades.
 export function fadeGain(gainNode, target, ctx) {
     const param = gainNode.gain;
     if (ctx && typeof param.setTargetAtTime === 'function') {
