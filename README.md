@@ -115,6 +115,8 @@ The manifest uses the current capability vocabulary: Stems owns public `commands
 
 Automation uses session-only claim snapshots. For example, NAM claims `stems` while AMP is enabled and dispatches `stems.mute` for the guitar target; Stems stores the previous on/volume state, mutes the matching stem, and restores only that claim when NAM releases it. Capability mutes are not written to per-song localStorage.
 
+Claims stack: when several claims mute the same stem, each keeps the player's pre-claim state, and the stem stays muted until every claim on it is restored; only the last restore brings back the player's on/volume. Automation mutes and restores fade over about 12 ms (`setTargetAtTime` with a 4 ms time constant) instead of clicking; in AudioWorklet playback mode, where stems have no Web Audio gain node, they switch instantly as before. Player toggles in the Stems UI stay instant.
+
 Manual user actions take precedence. When a player toggles a stem in the Stems UI, Stems records a user override with the capability registry so matching automation is reported as overridden instead of silently re-muting the user's choice.
 
 ## Capability Migration Path

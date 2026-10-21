@@ -2,6 +2,7 @@ import { computeMixGains } from './mix-gains.js';
 import { clampVolume, coerceBool, hashString, isGuitarStemId } from './util.js';
 import { ensureCtx, ensureWorklet, updateLatencyOffset } from './audio-ctx.js';
 import { makeStemGainHandle } from './mix.js';
+import { fadeGain, recordClaimMute, releaseClaim } from './claims.js';
 import { publishAudioGraph, retractAudioGraph } from './audio-graph-publish.js';
 import {
     setupStreaming, resetStreamState, streamingSupported, isWavResponse, configureStreaming,
@@ -1280,10 +1281,14 @@ import {
         registeredMixParticipantIds.clear();
     }
 
-    function applyStemState(stem, on, vol = stem.vol) {
+    // `fade` is for automation (capability mute/restore): a ~12 ms ramp.
+    // User toggles keep the instant switch.
+    function applyStemState(stem, on, vol = stem.vol, { fade = false } = {}) {
         stem.vol = Math.max(0, Math.min(1, Number.isFinite(Number(vol)) ? Number(vol) : stem.vol));
         stem.on = !!on;
-        stem.gain.gain.value = stem.on ? stem.vol : 0;
+        const target = stem.on ? stem.vol : 0;
+        if (fade) fadeGain(stem.gain, target, S.audioCtx);
+        else stem.gain.gain.value = target;
         if (stem.btn) stem.btn.className = stem.on ? ON_CLASS : OFF_CLASS;
         registerStemOwnerStatus('available');
     }
@@ -1377,11 +1382,8 @@ import {
         }
         const mutedIds = [];
         for (const stem of targets) {
-            if (claimId) {
-                const key = `${claimId}:${stem.id}`;
-                if (!claimSnapshots.has(key)) claimSnapshots.set(key, { claimId, id: stem.id, prevOn: stem.on, prevVol: stem.vol });
-            }
-            applyStemState(stem, false, stem.vol);
+            if (claimId) recordClaimMute(claimSnapshots, claimId, stem);
+            applyStemState(stem, false, stem.vol, { fade: true });
             mutedIds.push(stem.id);
         }
         return { outcome: 'handled', payload: redactedSongRef({ claimId, mutedIds }) };
@@ -1398,14 +1400,13 @@ import {
             catch (_) {}
         }
         const restoredIds = [];
-        for (const [key, previous] of Array.from(claimSnapshots.entries())) {
-            if (previous.claimId !== claimId) continue;
+        // Stems another claim still holds stay muted (claims stack).
+        for (const previous of releaseClaim(claimSnapshots, claimId)) {
             const stem = S.stemState.find(s => s.id === previous.id);
             if (stem) {
-                applyStemState(stem, previous.prevOn, previous.prevVol);
+                applyStemState(stem, previous.on, previous.vol, { fade: true });
                 restoredIds.push(stem.id);
             }
-            claimSnapshots.delete(key);
         }
         return { outcome: 'handled', payload: redactedSongRef({ claimId, restoredIds }) };
     }
