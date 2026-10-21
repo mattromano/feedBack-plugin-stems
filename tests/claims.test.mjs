@@ -520,3 +520,9 @@ test('main.js: the stem button marks the override after noting the change', () =
     assert.doesNotMatch(fnBody(MAIN, 'setMuted(id, muted) {'), /markPlayerOverride/);
     assert.doesNotMatch(fnBody(MAIN, 'setVolume(id, vol) {'), /markPlayerOverride/);
 });
+
+test('a claim mute, restore or reassert refreshes aria-pressed and the label', () => {
+    const body = fnBody(MAIN, 'function applyStemState(');
+    assert.ok(body.includes('updateStemButton(stem)'));
+    assert.ok(!body.includes('stem.btn.className'));
+});

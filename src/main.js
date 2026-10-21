@@ -1300,7 +1300,7 @@ import {
         const target = stem.on ? stem.vol : 0;
         if (fade) fadeGain(stem.gain, target, S.audioCtx);
         else stem.gain.gain.value = target;
-        if (stem.btn) stem.btn.className = stem.on ? ON_CLASS : OFF_CLASS;
+        updateStemButton(stem);
         registerStemOwnerStatus('available');
     }
 
