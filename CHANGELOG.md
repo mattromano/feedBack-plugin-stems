@@ -4,6 +4,9 @@ All notable changes to the Stems Toggle plugin are documented here.
 
 ## [Unreleased]
 
+### Changed
+- Docs and tests name RockHeroSmith (formerly Build-a-Band; screen `plugin-rockherosmith`).
+
 ## [0.9.0] — Per-stem display metadata (name/description)
 
 ### Added

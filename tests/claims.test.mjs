@@ -375,14 +375,14 @@ function stemMixerPush(api, stems, id, v) {
 test('a claimed stem stays muted through a stem_mixer push and restores at its volume', () => {
     const drums = fakeStem('drums', true, 0.8);
     const h = harness([drums]);
-    h.mute('build_a_band:sound:drums', drums);
+    h.mute('rockherosmith:sound:drums', drums);
     stemMixerPush(h.api, [drums], 'drums', 0.6);
     assert.equal(drums.on, true, 'the mixer wrote it on synchronously');
     h.flush();
     assert.equal(drums.on, false);
     assert.equal(drums.gain.gain.value, 0);
     assert.deepEqual(h.saves.at(-1), [{ id: 'drums', on: true }], 'never saved as muted');
-    assert.deepEqual(releaseClaim(h.snapshots, 'build_a_band:sound:drums'),
+    assert.deepEqual(releaseClaim(h.snapshots, 'rockherosmith:sound:drums'),
         [{ id: 'drums', on: true, vol: 0.6 }]);
 });
 
