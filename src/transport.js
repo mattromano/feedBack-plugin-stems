@@ -67,10 +67,27 @@ function transportPlayheadRaw() {
 // actually heard. Paused/stopped and legacy mode return the raw value.
 export function transportPlayhead() {
     const raw = transportPlayheadRaw();
-    if (!S.useWorklet || !transport.playing || S.latencyOffsetSec <= 0) return raw;
+    if (!transport.playing) return raw;
+    const lat = (S.useWorklet && S.latencyOffsetSec > 0 ? S.latencyOffsetSec : 0)
+        + heardDelaySec() * transport.rate;
+    if (lat <= 0) return raw;
     const dur = transport.duration;
-    const t = raw - S.latencyOffsetSec;
+    const t = raw - lat;
     return Math.max(0, dur > 0 ? Math.min(t, dur) : t);
+}
+
+// How far the speakers trail this context's clock (s of context time), as
+// measured by the desktop host (core juce-audio.js): the engine's song bus
+// reports the context frame being heard, or, on the default device, the
+// context's own output timestamp. Subtracting it makes the playhead the song
+// as HEARD, so picture and sound line up for every device, driver and buffer
+// size. Only a fresh measurement of THIS context counts; anything else is 0
+// (browser host, no measurement yet, a previous song's context).
+function heardDelaySec() {
+    const d = typeof window !== 'undefined' ? window.__fbSongOutputDelay : null;
+    if (!d || d.ctx !== S.audioCtx || !Number.isFinite(d.sec)) return 0;
+    if (!(performance.now() - d.at < 2000)) return 0;
+    return d.sec > 0 && d.sec < 1 ? d.sec : 0;
 }
 
 // Stop + release every active source node. Detaching `onended` first

@@ -4,6 +4,14 @@ All notable changes to the Stems Toggle plugin are documented here.
 
 ## [Unreleased]
 
+### Fixed
+- The playhead (and so the highway, note detection and every `#audio.currentTime`
+  reader) now follows the song as HEARD: it drops the output delay the desktop
+  host measures for the stems AudioContext (`window.__fbSongOutputDelay` — the
+  engine song bus's heard frame under ASIO / exclusive output, the context's
+  output timestamp on the default device). That delay was 100-180 ms under ASIO
+  and changed between sessions, so no fixed A/V offset could hold.
+
 ### Changed
 - Docs and tests name RockHeroSmith (formerly Build-a-Band; screen `plugin-rockherosmith`).
 
