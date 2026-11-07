@@ -115,3 +115,18 @@ test('the load path reads the shared accessor, not the highway directly', () => 
     const init = block(SRC, 'function tryInitForCurrentSong()');
     assert.match(init, /currentSongInfo\s*\(\s*\)/);
 });
+
+test('event filenames are decoded once, so the preload never double-encodes (feedBack-desktop#14)', () => {
+    const fns = block(SRC, 'function plainFilename(') + '\n' + block(SRC, 'function songRefFromDetail(');
+    const { plainFilename, songRefFromDetail } = new Function(`${fns}; return { plainFilename, songRefFromDetail };`)();
+    assert.equal(plainFilename('sloppak%2FMCR_House-of-Wolves_v1.sloppak'), 'sloppak/MCR_House-of-Wolves_v1.sloppak');
+    assert.equal(plainFilename('sloppak/MCR_House-of-Wolves_v1.sloppak'), 'sloppak/MCR_House-of-Wolves_v1.sloppak');
+    assert.equal(plainFilename('weird%zz name'), 'weird%zz name', 'not an escape: left alone');
+    assert.equal(plainFilename(null), null);
+    // Both event shapes now resolve to the same plain path.
+    const a = songRefFromDetail({ filename: 'sloppak%2FMy-Chemical-Romance_Sleep_v2.sloppak' });
+    const b = songRefFromDetail({ payload: { target: { filename: 'sloppak/My-Chemical-Romance_Sleep_v2.sloppak' } } });
+    assert.equal(a.filename, b.filename);
+    // So the fetch encodes exactly once.
+    assert.equal(encodeURIComponent(a.filename), 'sloppak%2FMy-Chemical-Romance_Sleep_v2.sloppak');
+});
