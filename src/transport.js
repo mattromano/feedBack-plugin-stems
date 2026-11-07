@@ -68,9 +68,10 @@ function transportPlayheadRaw() {
 export function transportPlayhead() {
     const raw = transportPlayheadRaw();
     if (!transport.playing) return raw;
-    const lat = (S.useWorklet && S.latencyOffsetSec > 0 ? S.latencyOffsetSec : 0)
+    // WSOLA's offset is signed (negative below 1.0x, see updateLatencyOffset).
+    const lat = (S.useWorklet && Number.isFinite(S.latencyOffsetSec) ? S.latencyOffsetSec : 0)
         + heardDelaySec() * transport.rate;
-    if (lat <= 0) return raw;
+    if (lat === 0) return raw;
     const dur = transport.duration;
     const t = raw - lat;
     return Math.max(0, dur > 0 ? Math.min(t, dur) : t);

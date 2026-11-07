@@ -47,14 +47,18 @@ export function ensureWorklet() {
     return S.workletModulePromise;
 }
 
-// WSOLA buffers audio internally, so what is HEARD lags the read frontier
-// by a fixed number of output samples (worklet 'ready' reports it). In song
-// time that lag scales with the rate. At rate 1.0 the worklet is an exact
-// pass-through (no stretch, no latency), so the offset is zero.
+// WSOLA's output lags by L output samples (worklet 'ready' reports L), which
+// is L * rate of song time — but each grain is read L source samples AHEAD of
+// the read frontier, which puts the content L of song time early. Net: the
+// heard song position trails the frontier by L * (rate - 1) / sr. That is
+// NEGATIVE below 1.0x (the stretched audio is ahead of the frontier clock) and
+// exactly 0 at 1.0x, matching the worklet's pass-through there. Measured on the
+// real worklet with a click train (tests/stretch-worklet-heard-time.test.mjs):
+// within 1.5 ms at 0.5-1.5x, where the old L * rate was 16 ms off at every rate.
 export function updateLatencyOffset() {
     if (S.useWorklet && S.audioCtx && S.workletLatencyOutSamples > 0
             && Math.abs(transport.rate - 1) > 1e-6) {
-        S.latencyOffsetSec = (S.workletLatencyOutSamples / S.audioCtx.sampleRate) * transport.rate;
+        S.latencyOffsetSec = (S.workletLatencyOutSamples / S.audioCtx.sampleRate) * (transport.rate - 1);
     } else {
         S.latencyOffsetSec = 0;
     }

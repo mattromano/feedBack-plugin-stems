@@ -11,6 +11,11 @@ All notable changes to the Stems Toggle plugin are documented here.
   engine song bus's heard frame under ASIO / exclusive output, the context's
   output timestamp on the default device). That delay was 100-180 ms under ASIO
   and changed between sessions, so no fixed A/V offset could hold.
+- Practice speeds: the WSOLA latency compensation is L * (rate - 1) / sr, not
+  L * rate / sr — each grain is read L source samples ahead of the frontier.
+  The old figure put the playhead 16 ms behind the music at every speed other
+  than 1.0x (measured on the real worklet with a click train; now within 1.5 ms
+  at 0.5-1.5x, `tests/stretch-worklet-heard-time.test.mjs`).
 
 ### Changed
 - Docs and tests name RockHeroSmith (formerly Build-a-Band; screen `plugin-rockherosmith`).
