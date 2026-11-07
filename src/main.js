@@ -311,14 +311,24 @@ import {
     }
 
     // ── UI ──
+    // Stem volume lives in ONE place: the core Mixer, where every stem is already a fader
+    // (registerStemMixParticipant). This plugin's own click-to-mute / drag-volume button row in
+    // the player bar was a second, duplicate control (and the separate Stem Mixer plugin a
+    // third) — feedBack-desktop#19. The row is off; the old builder stays below behind the flag.
+    const SHOW_PLAYER_STEM_BAR = false;
     function injectUI() {
         cleanupPointerHandlers();
         pointerCleanupHandlers.clear();
-        const c = document.getElementById('player-controls');
-        if (!c) return;
         // Remove any previous bar
         const prev = document.getElementById('stems-mixer');
         if (prev) prev.remove();
+        if (!SHOW_PLAYER_STEM_BAR) {
+            // The one thing the bar build did besides drawing: apply each stem's saved volume.
+            for (const s of S.stemState) setStemVolume(s, s.vol, { persist: false });
+            return;
+        }
+        const c = document.getElementById('player-controls');
+        if (!c) return;
 
         S.container = document.createElement('div');
         S.container.id = 'stems-mixer';
@@ -957,12 +967,23 @@ import {
     // present on every playback:* emit), so both paths resolve the song key
     // from one place — a ready that arrives without a preceding loading still
     // gets the correct key.
+    // Playback events don't agree on the filename's form: one carries it as playSong received
+    // it (already URL-encoded, 'sloppak%2F…'), another plain. Encoding the encoded form again
+    // in preloadSong 404'd ('%252F'), and that failed call wiped the good preload; the mixed
+    // forms also broke currentSongInfo()'s filename match (feedBack-desktop#14). Decode once
+    // here so every consumer sees the plain path.
+    function plainFilename(f) {
+        if (typeof f !== 'string' || !f) return f || null;
+        if (!/%[0-9A-Fa-f]{2}/.test(f)) return f;
+        try { return decodeURIComponent(f); } catch (_) { return f; }
+    }
+
     function songRefFromDetail(detail = {}) {
         const payload = detail && detail.payload && typeof detail.payload === 'object' ? detail.payload : (detail || {});
         const target = payload.target && typeof payload.target === 'object' ? payload.target : {};
         return {
             songKey: target.settingsKey || payload.settingsKey || null,
-            filename: payload.filename || target.filename || null,
+            filename: plainFilename(payload.filename || target.filename || null),
         };
     }
 
@@ -1024,7 +1045,7 @@ import {
         const signature = songInfoSignature(info);
         if (signature === S.readySignature) return true;
         S.readySignature = signature;
-        S.currentFilename = info.filename || (window.slopsmith && window.slopsmith.currentSong && window.slopsmith.currentSong.filename) || S.currentFilename || null;
+        S.currentFilename = plainFilename(info.filename || (window.slopsmith && window.slopsmith.currentSong && window.slopsmith.currentSong.filename) || S.currentFilename || null);
         try { onSongReady(); } catch (e) { console.warn('[stems] init failed:', e); }
         return true;
     }
@@ -1257,12 +1278,15 @@ import {
                     max: 1,
                     step: 0.01,
                     defaultValue: 1,
-                    currentValue: stem.vol,
+                    currentValue: stem.on ? stem.vol : 0,
                 },
                 operations: ['fader.get-value', 'fader.set-value'],
                 operationHandlers: {
-                    'fader.get-value': () => stem.vol,
+                    // The core Mixer is the only stem control now (feedBack-desktop#19), so it
+                    // carries mute too: a muted stem reads 0, and raising its fader un-mutes it.
+                    'fader.get-value': () => (stem.on ? stem.vol : 0),
                     'fader.set-value': (value) => {
+                        if (Number(value) > 0 && !stem.on) stemsApi.setMuted(stem.id, false);
                         const committed = stemsApi.setVolume(stem.id, value);
                         if (committed === undefined) return { outcome: 'no-target', reason: `Stem ${stem.id} is no longer available` };
                         return { committedValue: committed };
