@@ -11,6 +11,7 @@ export const transport = {
     baseCtxTime: 0,    // ctx.currentTime when the current run started
     rate: 1,           // uniform AudioBufferSourceNode.playbackRate
     duration: 0,       // max decoded buffer length (s)
+    anchor: null,      // last start/seek/rate change, for the heard playhead (transport.js)
 };
 
 export const registeredMixParticipantIds = new Set();

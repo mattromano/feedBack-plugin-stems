@@ -62,15 +62,104 @@ function transportPlayheadRaw() {
 }
 
 // The position the rest of slopsmith (incl. the highway) sees via the
-// #audio.currentTime shim. In worklet mode while playing, shift the raw
-// read frontier back by the WSOLA latency so the highway tracks what is
-// actually heard. Paused/stopped and legacy mode return the raw value.
+// #audio.currentTime shim: the song as HEARD while playing. Paused/stopped
+// return the held position.
+//
+// The output delay is context time, so it is taken off the context clock
+// BEFORE the rate is applied: the heard position is the frontier clock
+// evaluated at (now - delay). Each discontinuity — a start, a seek, a rate
+// change — leaves an anchor at the context time it took effect, because the
+// audio already in the output pipeline still belongs to the old trajectory:
+//   - start / seek: nothing of the new position is heard yet, so the playhead
+//     HOLDS at the target until it is (a seek reads back as its target, like
+//     an HTMLMediaElement; play never jumps back by the delay);
+//   - rate change: the old rate carries on until the change is heard (no
+//     jump from rescaling the in-flight delay).
+// Streaming's 'pos' re-baselines move baseOffset/baseCtxTime every ~20 ms
+// without an anchor; evaluating that line at (now - delay) still works.
+// The WSOLA offset (signed, see updateLatencyOffset) is song time and is
+// subtracted per segment.
 export function transportPlayhead() {
     const raw = transportPlayheadRaw();
-    if (!S.useWorklet || !transport.playing || S.latencyOffsetSec <= 0) return raw;
+    if (!transport.playing || !S.audioCtx) return raw;
+    const heardCtx = S.audioCtx.currentTime - heardDelaySec();
+    const live = {
+        baseOffset: transport.baseOffset, baseCtxTime: transport.baseCtxTime,
+        rate: transport.rate, lat: wsolaLatencySec(),
+    };
+    const t = heardAt(heardCtx, live, transport.anchor);
     const dur = transport.duration;
-    const t = raw - S.latencyOffsetSec;
     return Math.max(0, dur > 0 ? Math.min(t, dur) : t);
+}
+
+function wsolaLatencySec() {
+    return S.useWorklet && Number.isFinite(S.latencyOffsetSec) ? S.latencyOffsetSec : 0;
+}
+
+// Song time heard at context time `hc` on segment `seg` (a frontier line:
+// baseOffset at baseCtxTime, advancing at `rate`, WSOLA offset `lat`) whose
+// anchor `a` says when it took effect. Before that, the previous segment
+// (rate change) or a hold at the anchor's target (start / seek).
+function heardAt(hc, seg, a) {
+    if (!a || hc >= a.ctx) {
+        const t = seg.baseOffset + (hc - seg.baseCtxTime) * seg.rate - seg.lat;
+        return Math.max(a ? a.floor : 0, t);
+    }
+    if (a.prev) return heardAt(hc, a.prev, a.prev.anchor);
+    return a.floor;
+}
+
+// A start or seek: the playhead holds at `offset` until audio rendered from
+// context time `ctxTime` on reaches the speakers.
+function anchorJump(ctxTime, offset) {
+    transport.anchor = { ctx: ctxTime, floor: offset, prev: null };
+}
+
+// A rate change at context time `ctxTime`, called BEFORE the transport is
+// re-baselined: the outgoing line (old base, rate and WSOLA offset) is kept
+// for the audio still in flight. Older segments than any heard delay can
+// reach (< 1 s, see heardDelaySec) are dropped.
+function anchorRateChange(ctxTime) {
+    const prune = (a) => a && {
+        ctx: a.ctx, floor: a.floor,
+        prev: a.prev && a.ctx > ctxTime - 1 ? { ...a.prev, anchor: prune(a.prev.anchor) } : null,
+    };
+    const a = transport.anchor;
+    transport.anchor = {
+        ctx: ctxTime,
+        floor: a ? a.floor : 0,
+        prev: {
+            baseOffset: transport.baseOffset, baseCtxTime: transport.baseCtxTime,
+            rate: transport.rate, lat: wsolaLatencySec(), anchor: prune(a),
+        },
+    };
+}
+
+// How far the speakers trail this context's clock (s of context time), as
+// measured by the desktop host (core juce-audio.js): the engine's song bus
+// reports the context frame being heard, or, on the default device, the
+// context's own output timestamp. Subtracting it makes the playhead the song
+// as HEARD, so picture and sound line up for every device, driver and buffer
+// size. Only a measurement of THIS context counts; anything else is 0
+// (browser host, no measurement yet, a previous song's context).
+//
+// The last good figure is HELD for as long as the context lives: the host
+// clears its figure while it re-measures (song bus engaged / dropped, 3
+// samples before it republishes), skips samples on a slow IPC round trip or a
+// hidden window, and stops refreshing it across a suspend. Dropping to 0 in
+// those gaps would step the playhead forward by the whole delay and back again
+// once a figure lands; the held value is the best estimate meanwhile. Only a
+// new context discards it.
+const heldDelay = { ctx: null, sec: 0 };
+function heardDelaySec() {
+    const ctx = S.audioCtx;
+    if (!ctx) return 0;
+    const d = typeof window !== 'undefined' ? window.__fbSongOutputDelay : null;
+    if (d && d.ctx === ctx && Number.isFinite(d.sec) && d.sec >= 0 && d.sec < 1) {
+        heldDelay.ctx = ctx;
+        heldDelay.sec = d.sec;
+    }
+    return heldDelay.ctx === ctx ? heldDelay.sec : 0;
 }
 
 // Stop + release every active source node. Detaching `onended` first
@@ -106,6 +195,7 @@ function workletStartSources(offset) {
     } catch (_) {}
     transport.baseOffset = startAt;
     transport.baseCtxTime = S.audioCtx.currentTime;
+    anchorJump(transport.baseCtxTime, startAt);
     // Begin from the start position unless we're already at the very end;
     // a too-late offset just makes the worklet post 'ended' on the next
     // quantum, which flips playing back to false.
@@ -148,6 +238,7 @@ function startSources(offset) {
     }
     transport.baseOffset = offset;
     transport.baseCtxTime = when;
+    anchorJump(when, offset);
     // "playing" only if at least one source actually started — covers a
     // seek-to-end where every stem is exhausted at `offset`.
     transport.playing = longest != null;
@@ -169,6 +260,8 @@ export function flushPendingPlayResolvers() {
     }
 }
 
+export { transportSeek, setTransportRate };  // for tests; the shims are the API
+
 export function transportPlay() {
     resumeCtx();
     if (!S.buffersReady) { S.pendingPlay = true; return; }
@@ -189,6 +282,13 @@ export function transportPlay() {
     flushPendingPlayResolvers();
 }
 
+// Pause (and lightStop below) hold the HEARD position, so the highway stops
+// on the note that was sounding. The audio already in the output pipeline
+// (the heard delay: ~100-180 ms under ASIO, a few ms on the default device)
+// still plays out after the click, and resume restarts from the held
+// position — so that tail is heard again on resume. Deliberate: picture and
+// sound agree on where the song stopped, and the replay is shorter than the
+// reaction time of whoever pressed pause.
 function transportPause() {
     S.pendingPlay = false;
     flushPendingPlayResolvers();
@@ -231,6 +331,7 @@ function transportSeek(t) {
         // the clock; works whether or not we're currently playing.
         transport.baseOffset = target;
         transport.baseCtxTime = S.audioCtx ? S.audioCtx.currentTime : 0;
+        anchorJump(transport.baseCtxTime, target);
         repositionStream(target);
     } else if (S.useWorklet) {
         // Tell the worklet to move its read pointer and flush WSOLA state
@@ -241,6 +342,7 @@ function transportSeek(t) {
         }
         transport.baseOffset = target;
         transport.baseCtxTime = S.audioCtx ? S.audioCtx.currentTime : 0;
+        anchorJump(transport.baseCtxTime, target);
     } else if (transport.playing) {
         // Stop + recreate all sources at the new offset so they relock.
         startSources(target);
@@ -264,6 +366,8 @@ function setTransportRate(r) {
         // Use the RAW frontier (not latency-compensated): the new latency
         // offset is re-applied forward, so capturing the compensated value
         // here would double-count it and jump the reported time.
+        // The anchor keeps the outgoing rate for the audio still in flight.
+        anchorRateChange(S.audioCtx.currentTime);
         transport.baseOffset = transportPlayheadRaw();
         transport.baseCtxTime = S.audioCtx.currentTime;
     }
