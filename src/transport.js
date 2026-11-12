@@ -82,13 +82,26 @@ export function transportPlayhead() {
 // reports the context frame being heard, or, on the default device, the
 // context's own output timestamp. Subtracting it makes the playhead the song
 // as HEARD, so picture and sound line up for every device, driver and buffer
-// size. Only a fresh measurement of THIS context counts; anything else is 0
+// size. Only a measurement of THIS context counts; anything else is 0
 // (browser host, no measurement yet, a previous song's context).
+//
+// The last good figure is HELD for as long as the context lives: the host
+// clears its figure while it re-measures (song bus engaged / dropped, 3
+// samples before it republishes), skips samples on a slow IPC round trip or a
+// hidden window, and stops refreshing it across a suspend. Dropping to 0 in
+// those gaps would step the playhead forward by the whole delay and back again
+// once a figure lands; the held value is the best estimate meanwhile. Only a
+// new context discards it.
+const heldDelay = { ctx: null, sec: 0 };
 function heardDelaySec() {
+    const ctx = S.audioCtx;
+    if (!ctx) return 0;
     const d = typeof window !== 'undefined' ? window.__fbSongOutputDelay : null;
-    if (!d || d.ctx !== S.audioCtx || !Number.isFinite(d.sec)) return 0;
-    if (!(performance.now() - d.at < 2000)) return 0;
-    return d.sec > 0 && d.sec < 1 ? d.sec : 0;
+    if (d && d.ctx === ctx && Number.isFinite(d.sec) && d.sec >= 0 && d.sec < 1) {
+        heldDelay.ctx = ctx;
+        heldDelay.sec = d.sec;
+    }
+    return heldDelay.ctx === ctx ? heldDelay.sec : 0;
 }
 
 // Stop + release every active source node. Detaching `onended` first

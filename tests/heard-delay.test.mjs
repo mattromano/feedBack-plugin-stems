@@ -9,8 +9,10 @@ globalThis.window = globalThis;
 const { transportPlayhead } = await import('../src/transport.js');
 const { S, transport } = await import('../src/state.js');
 
-const ctx = { currentTime: 100 };
+// A fresh context per scenario: the held delay belongs to one context.
+let ctx = null;
 function playingAt(ctxTime, { rate = 1, base = 10, baseCtx = 90 } = {}) {
+    ctx = { currentTime: 100 };
     S.audioCtx = ctx;
     S.useWorklet = false;
     S.latencyOffsetSec = 0;
@@ -56,13 +58,31 @@ test('another context\'s figure (a previous song) is never applied', () => {
     assert.equal(transportPlayhead(), 20);
 });
 
-test('a stale figure (> 2 s old) is ignored', () => {
+test('the last good figure is held while the host re-measures (cleared / stale / skipped)', () => {
     playingAt(100);
-    delay(0.058, { at: performance.now() - 5000 });
+    delay(0.058);
+    assert.ok(Math.abs(transportPlayhead() - (20 - 0.058)) < 1e-9);
+    // Host cleared it (song bus engaged): no forward step by the whole delay.
+    window.__fbSongOutputDelay = null;
+    assert.ok(Math.abs(transportPlayhead() - (20 - 0.058)) < 1e-9);
+    // An old figure of the same context still counts.
+    delay(0.060, { at: performance.now() - 60000 });
+    assert.ok(Math.abs(transportPlayhead() - (20 - 0.060)) < 1e-9);
+    // Nonsense in the gap doesn't replace it either.
+    delay(NaN);
+    assert.ok(Math.abs(transportPlayhead() - (20 - 0.060)) < 1e-9);
+});
+
+test('a new context drops the held figure', () => {
+    playingAt(100);
+    delay(0.058);
+    transportPlayhead();
+    playingAt(100);                         // next song: a new AudioContext
+    window.__fbSongOutputDelay = null;
     assert.equal(transportPlayhead(), 20);
 });
 
-test('nonsense values are ignored', () => {
+test('nonsense values are ignored (0 is a valid zero delay)', () => {
     for (const sec of [NaN, -0.01, 0, 1.5, Infinity]) {
         playingAt(100);
         delay(sec);
