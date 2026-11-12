@@ -6,8 +6,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 globalThis.window = globalThis;
-const { transportPlayhead } = await import('../src/transport.js');
-const { S, transport } = await import('../src/state.js');
+globalThis.document = { getElementById: () => null };   // dispatchAudioEvent: no #audio
+const { transportPlayhead, transportPlay, transportSeek, setTransportRate, onWorkletMessage } = await import('../src/transport.js');
+const { S, ST, transport } = await import('../src/state.js');
+const near = (a, b, msg) => assert.ok(Math.abs(a - b) < 1e-9, `${msg || ''} got ${a}, want ${b}`);
 
 // A fresh context per scenario: the held delay belongs to one context.
 let ctx = null;
@@ -22,6 +24,11 @@ function playingAt(ctxTime, { rate = 1, base = 10, baseCtx = 90 } = {}) {
     transport.baseOffset = base;
     transport.baseCtxTime = baseCtx;
     transport.duration = 600;
+    transport.anchor = null;
+    S.stemState = [];
+    S.workletNode = { port: { postMessage() {} } };
+    S.workletLatencyOutSamples = 0;
+    ST.streaming = false;
 }
 const delay = (sec, extra = {}) => { window.__fbSongOutputDelay = { ctx, sec, source: 'song-bus', at: performance.now(), ...extra }; };
 
@@ -95,4 +102,77 @@ test('paused: the held position, untouched', () => {
     delay(0.058);
     transport.playing = false;
     assert.equal(transportPlayhead(), 10);
+});
+
+// ── Discontinuities: the delay is context time, taken off before the rate ──
+
+test('seek while playing reads back as its target (core setLoop landed-check) and holds until heard', () => {
+    playingAt(100);
+    S.useWorklet = true;
+    delay(0.15);
+    transportSeek(50);
+    assert.equal(transportPlayhead(), 50);          // |to - A| = 0 < 50 ms
+    ctx.currentTime = 100.1;                        // old audio still in the pipeline
+    assert.equal(transportPlayhead(), 50);
+    ctx.currentTime = 100.25;                       // 100 ms after the target is heard
+    near(transportPlayhead(), 50.1);
+});
+
+test('play from pause starts at the paused position, no jump back by the delay', () => {
+    playingAt(100);
+    S.useWorklet = true;
+    S.buffersReady = true;
+    S.pendingPlayResolvers = [];
+    delay(0.15);
+    transport.playing = false;
+    transport.baseOffset = 42;
+    transportPlay();
+    assert.equal(transport.playing, true);
+    assert.equal(transportPlayhead(), 42);
+    ctx.currentTime = 100.15;
+    assert.equal(transportPlayhead(), 42);
+    ctx.currentTime = 100.4;
+    near(transportPlayhead(), 42.25);
+});
+
+test('rate change: the in-flight audio keeps the old rate, no rescale jump', () => {
+    playingAt(100);                                 // 1.0x, frontier 20 at ctx 100
+    delay(0.15);
+    near(transportPlayhead(), 19.85);
+    setTransportRate(0.5);
+    near(transportPlayhead(), 19.85, 'continuous at the change');   // was 19.925
+    ctx.currentTime = 100.1;
+    near(transportPlayhead(), 19.95, 'still the 1.0x audio');
+    ctx.currentTime = 100.15;
+    near(transportPlayhead(), 20, 'the change is heard');
+    ctx.currentTime = 100.35;
+    near(transportPlayhead(), 20.1, 'then 0.5x');
+});
+
+test('rate change at practice speed with WSOLA: continuous across the change', () => {
+    playingAt(100, { rate: 0.8 });                  // frontier 18
+    S.useWorklet = true;
+    S.audioCtx.sampleRate = 48000;
+    S.workletLatencyOutSamples = 768;
+    S.latencyOffsetSec = 768 / 48000 * (0.8 - 1);
+    delay(0.1);
+    const before = transportPlayhead();
+    setTransportRate(1.25);
+    near(transportPlayhead(), before);
+    ctx.currentTime = 100.5;                        // heard at 100.4: 0.4 s at 1.25x
+    near(transportPlayhead(), 18 + 0.4 * 1.25 - 768 / 48000 * 0.25);
+});
+
+test('streaming pos re-baselines keep the heard clock running', () => {
+    playingAt(100);
+    S.useWorklet = true;
+    ST.streaming = true;
+    ST.streamSampleRate = 48000;
+    delay(0.15);
+    for (let i = 0; i <= 10; i++) {
+        ctx.currentTime = 100 + i * 0.02;
+        onWorkletMessage({ data: { type: 'pos', pos: Math.round((20 + i * 0.02) * 48000) } });
+        near(transportPlayhead(), 20 + i * 0.02 - 0.15, `tick ${i}`);
+    }
+    ST.streaming = false;
 });
