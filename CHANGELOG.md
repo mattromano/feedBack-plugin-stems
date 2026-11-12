@@ -11,6 +11,13 @@ All notable changes to the Stems Toggle plugin are documented here.
   engine song bus's heard frame under ASIO / exclusive output, the context's
   output timestamp on the default device). That delay was 100-180 ms under ASIO
   and changed between sessions, so no fixed A/V offset could hold.
+  The delay is taken off the context clock before the rate: a seek or play
+  holds at its target until the new audio is heard (a seek reads back as its
+  target, so core `setLoop`'s landed-check passes while playing), and a speed
+  change keeps the old rate for the audio still in flight. The last good figure
+  is held while the host re-measures; only a new AudioContext drops it.
+  Known behaviour: pause holds the heard position, so the delay's worth of
+  audio that plays out after the click is heard again on resume.
 - Practice speeds: the WSOLA latency compensation is L * (rate - 1) / sr, not
   L * rate / sr — each grain is read L source samples ahead of the frontier.
   The old figure put the playhead 16 ms behind the music at every speed other

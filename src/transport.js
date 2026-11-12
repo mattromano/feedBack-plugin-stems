@@ -282,6 +282,13 @@ export function transportPlay() {
     flushPendingPlayResolvers();
 }
 
+// Pause (and lightStop below) hold the HEARD position, so the highway stops
+// on the note that was sounding. The audio already in the output pipeline
+// (the heard delay: ~100-180 ms under ASIO, a few ms on the default device)
+// still plays out after the click, and resume restarts from the held
+// position — so that tail is heard again on resume. Deliberate: picture and
+// sound agree on where the song stopped, and the replay is shorter than the
+// reaction time of whoever pressed pause.
 function transportPause() {
     S.pendingPlay = false;
     flushPendingPlayResolvers();
